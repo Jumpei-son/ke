@@ -1,0 +1,68 @@
+
+program kepsilon
+  implicit none
+
+  integer, parameter :: nx=50, nz=50
+  real, parameter :: dx=2.0, dz=1.0, dt=0.1, nu=1.5e-6
+  real, parameter :: g=9.8, rho0=1000.0
+  real, parameter :: c_mu=0.09, sigma_k=1.0, sigma_e=1.3
+  real, parameter :: c1e=1.44, c2e=1.92
+
+  integer :: i, j, t, nt=100
+  real :: u(nx,nz), w(nx,nz), T(nx,nz)
+  real :: k(nx,nz), e(nx,nz), nut(nx,nz), rho(nx,nz), delta
+  real :: pk(nx,nz), buoyancy_k, buoyancy_e
+
+  ! 初期条件
+  do j = 1, nz
+    do i = 1, nx
+      u(i,j) = 0.1
+      w(i,j) = 0.0
+      T(i,j) = 5.0 + 15.0 * 0.5 * (1.0 + tanh(6.0 * ((j*dz - 17.5) / 5.0)))  ! 躍層
+      rho(i,j) = rho0 * (1.0 - 0.0002*(T(i,j) - 4.0))  ! 水の密度と温度の関係（近似）
+      k(i,j) = 1e-4
+      e(i,j) = 1e-5
+      nut(i,j) = c_mu * k(i,j)**2 / e(i,j)
+    end do
+  end do
+
+  ! 時間ループ
+  do t = 1, nt
+    do j = 2, nz-1
+      do i = 2, nx-1
+        ! 乱流エネルギー生成（簡易モデル）
+        pk(i,j) = nut(i,j) * ((u(i+1,j)-u(i-1,j))/(2*dx))**2 + &
+                           nut(i,j) * ((w(i,j+1)-w(i,j-1))/(2*dz))**2
+
+        ! 浮力効果
+        delta = (rho0 - rho(i,j)) / rho0
+        buoyancy_k = -g * delta
+        buoyancy_e = 0.0  ! 浮力のε方程式への影響は無視（Cε2b=0）
+
+        ! k方程式（浮力含む）
+        k(i,j) = k(i,j) + dt * (pk(i,j) + buoyancy_k - e(i,j) + &
+                   (nu + nut(i,j)/sigma_k) * ((k(i+1,j) - 2*k(i,j) + k(i-1,j)) / dx**2 + &
+                                              (k(i,j+1) - 2*k(i,j) + k(i,j-1)) / dz**2))
+
+        ! ε方程式（浮力項なし）
+        e(i,j) = e(i,j) + dt * ((c1e * pk(i,j) * e(i,j) / k(i,j)) - &
+                   c2e * e(i,j)**2 / k(i,j) + &
+                   (nu + nut(i,j)/sigma_e) * ((e(i+1,j) - 2*e(i,j) + e(i-1,j)) / dx**2 + &
+                                              (e(i,j+1) - 2*e(i,j) + e(i,j-1)) / dz**2))
+
+        ! 渦動粘性係数更新
+        nut(i,j) = c_mu * k(i,j)**2 / e(i,j)
+      end do
+    end do
+  end do
+
+  ! 出力例
+  open(10, file='nut_buoyancy.dat')
+  do j = 1, nz
+    do i = 1, nx
+      write(10,'(3f10.3)') i*dx, j*dz, nut(i,j)
+    end do
+  end do
+  close(10)
+
+end program kepsilon
