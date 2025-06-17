@@ -1,68 +1,81 @@
-
-program kepsilon
+module mod_turbulence
   implicit none
+  ! モデル定数
+  real, parameter :: ce1 = 1.44, ce2 = 1.92, ce3 = 1.0
+  real, parameter :: sigma_k = 1.0, sigma_e = 1.3, sigma_b = 1.0
+  real, parameter :: cmu = 0.09
+  real, parameter :: rho0 = 1000.0  ! 基準密度 [kg/m^3]
+  real, parameter :: g = 9.8        ! 重力加速度 [m/s^2]
+contains
 
-  integer, parameter :: nx=50, nz=50
-  real, parameter :: dx=2.0, dz=1.0, dt=0.1, nu=1.5e-6
-  real, parameter :: g=9.8, rho0=1000.0
-  real, parameter :: c_mu=0.09, sigma_k=1.0, sigma_e=1.3
-  real, parameter :: c1e=1.44, c2e=1.92
+  subroutine solve_k_epsilon(k, e, u, w, rho, dx, dz, dt, nx, nz)
+    implicit none
+    integer, intent(in) :: nx, nz
+    real, intent(in) :: dx, dz, dt
+    real, intent(inout) :: k(0:nx+1,0:nz+1), e(0:nx+1,0:nz+1)
+    real, intent(in) :: u(0:nx+1,0:nz+1), w(0:nx+1,0:nz+1)
+    real, intent(in) :: rho(0:nx+1,0:nz+1)
 
-  integer :: i, j, t, nt=100
-  real :: u(nx,nz), w(nx,nz), T(nx,nz)
-  real :: k(nx,nz), e(nx,nz), nut(nx,nz), rho(nx,nz), delta
-  real :: pk(nx,nz), buoyancy_k, buoyancy_e
+    real :: dkdt, dedt, D, Pk, d_delta_dz
+    real :: du_dx, du_dz, dw_dx, dw_dz, S2, delta
+    real :: adv_k, adv_e, diff_k, diff_e, buoy_k, buoy_e
+    integer :: i, kidx
 
-  ! 初期条件
-  do j = 1, nz
     do i = 1, nx
-      u(i,j) = 0.1
-      w(i,j) = 0.0
-      T(i,j) = 5.0 + 15.0 * 0.5 * (1.0 + tanh(6.0 * ((j*dz - 17.5) / 5.0)))  ! 躍層
-      rho(i,j) = rho0 * (1.0 - 0.0002*(T(i,j) - 4.0))  ! 水の密度と温度の関係（近似）
-      k(i,j) = 1e-4
-      e(i,j) = 1e-5
-      nut(i,j) = c_mu * k(i,j)**2 / e(i,j)
-    end do
-  end do
+      do kidx = 1, nz
 
-  ! 時間ループ
-  do t = 1, nt
-    do j = 2, nz-1
-      do i = 2, nx-1
-        ! 乱流エネルギー生成（簡易モデル）
-        pk(i,j) = nut(i,j) * ((u(i+1,j)-u(i-1,j))/(2*dx))**2 + &
-                           nut(i,j) * ((w(i,j+1)-w(i,j-1))/(2*dz))**2
+        ! 渦動粘性係数
+        if (e(i,kidx) > 1.0e-8) then
+          D = cmu * k(i,kidx)**2 / e(i,kidx)
+        else
+          D = 0.0
+        end if
 
-        ! 浮力効果
-        delta = (rho0 - rho(i,j)) / rho0
-        buoyancy_k = -g * delta
-        buoyancy_e = 0.0  ! 浮力のε方程式への影響は無視（Cε2b=0）
+        ! 速度勾配によるせん断生成項 S^2
+        du_dx = (u(i+1,kidx) - u(i-1,kidx)) / (2.0 * dx)
+        du_dz = (u(i,kidx+1) - u(i,kidx-1)) / (2.0 * dz)
+        dw_dx = (w(i+1,kidx) - w(i-1,kidx)) / (2.0 * dx)
+        dw_dz = (w(i,kidx+1) - w(i,kidx-1)) / (2.0 * dz)
 
-        ! k方程式（浮力含む）
-        k(i,j) = k(i,j) + dt * (pk(i,j) + buoyancy_k - e(i,j) + &
-                   (nu + nut(i,j)/sigma_k) * ((k(i+1,j) - 2*k(i,j) + k(i-1,j)) / dx**2 + &
-                                              (k(i,j+1) - 2*k(i,j) + k(i,j-1)) / dz**2))
+        S2 = 2.0 * (du_dx**2 + dw_dz**2 + 0.5*(du_dz + dw_dx)**2)
+        Pk = D * S2
 
-        ! ε方程式（浮力項なし）
-        e(i,j) = e(i,j) + dt * ((c1e * pk(i,j) * e(i,j) / k(i,j)) - &
-                   c2e * e(i,j)**2 / k(i,j) + &
-                   (nu + nut(i,j)/sigma_e) * ((e(i+1,j) - 2*e(i,j) + e(i-1,j)) / dx**2 + &
-                                              (e(i,j+1) - 2*e(i,j) + e(i,j-1)) / dz**2))
+        ! 浮力項（密度勾配による浮力生成）
+        d_delta_dz = ((rho0 - rho(i,kidx+1))/rho0 - (rho0 - rho(i,kidx-1))/rho0) / (2.0*dz)
+        buoy_k = sigma_b * g * d_delta_dz
+        if (k(i,kidx) > 1.0e-8) then
+          buoy_e = ce3 * sigma_b * g * d_delta_dz * e(i,kidx) / k(i,kidx)
+        else
+          buoy_e = 0.0
+        end if
 
-        ! 渦動粘性係数更新
-        nut(i,j) = c_mu * k(i,j)**2 / e(i,j)
+        ! ---- k方程式 ----
+        adv_k = - u(i,kidx) * (k(i,kidx) - k(i-1,kidx)) / dx  &
+                - w(i,kidx) * (k(i,kidx) - k(i,kidx-1)) / dz
+
+        diff_k = D / sigma_k * ( &
+                  (k(i+1,kidx) - 2.0*k(i,kidx) + k(i-1,kidx)) / dx**2 + &
+                  (k(i,kidx+1) - 2.0*k(i,kidx) + k(i,kidx-1)) / dz**2 )
+
+        dkdt = adv_k + diff_k + Pk + buoy_k - e(i,kidx)
+
+        ! ---- ε方程式 ----
+        adv_e = - u(i,kidx) * (e(i,kidx) - e(i-1,kidx)) / dx  &
+                - w(i,kidx) * (e(i,kidx) - e(i,kidx-1)) / dz
+
+        diff_e = D / sigma_e * ( &
+                   (e(i+1,kidx) - 2.0*e(i,kidx) + e(i-1,kidx)) / dx**2 + &
+                   (e(i,kidx+1) - 2.0*e(i,kidx) + e(i,kidx-1)) / dz**2 )
+
+        dedt = adv_e + diff_e + ce1 * Pk * e(i,kidx) / k(i,kidx) &
+                - ce2 * e(i,kidx)**2 / k(i,kidx) + buoy_e
+
+        ! 時間積分（Euler）
+        k(i,kidx) = max(k(i,kidx) + dt * dkdt, 1.0e-10)
+        e(i,kidx) = max(e(i,kidx) + dt * dedt, 1.0e-10)
+
       end do
     end do
-  end do
+  end subroutine solve_k_epsilon
 
-  ! 出力例
-  open(10, file='nut_buoyancy.dat')
-  do j = 1, nz
-    do i = 1, nx
-      write(10,'(3f10.3)') i*dx, j*dz, nut(i,j)
-    end do
-  end do
-  close(10)
-
-end program kepsilon
+end module mod_turbulence
