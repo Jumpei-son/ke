@@ -1,81 +1,76 @@
-module mod_turbulence
+subroutine solve_k_epsilon_upwind(tke, td_eps, u, w, rho, nut, dx, dz, dt, nx, nz)
   implicit none
-  ! モデル定数
-  real, parameter :: ce1 = 1.44, ce2 = 1.92, ce3 = 1.0
+  integer, intent(in) :: nx, nz
+  real, intent(in) :: dx, dz, dt
+  real, intent(inout) :: tke(0:nx+1,0:nz+1), td_eps(0:nx+1,0:nz+1)
+  real, intent(in) :: u(0:nx+1,0:nz+1), w(0:nx+1,0:nz+1)
+  real, intent(in) :: rho(0:nx+1,0:nz+1)
+  real, intent(out) :: nut(0:nx+1,0:nz+1)
+
+  real, parameter :: cmu = 0.09, ce1 = 1.44, ce2 = 1.92, ce3 = 1.0
   real, parameter :: sigma_k = 1.0, sigma_e = 1.3, sigma_b = 1.0
-  real, parameter :: cmu = 0.09
-  real, parameter :: rho0 = 1000.0  ! 基準密度 [kg/m^3]
-  real, parameter :: g = 9.8        ! 重力加速度 [m/s^2]
-contains
+  real, parameter :: rho0 = 1000.0, g = 9.8
 
-  subroutine solve_k_epsilon(k, e, u, w, rho, dx, dz, dt, nx, nz)
-    implicit none
-    integer, intent(in) :: nx, nz
-    real, intent(in) :: dx, dz, dt
-    real, intent(inout) :: k(0:nx+1,0:nz+1), e(0:nx+1,0:nz+1)
-    real, intent(in) :: u(0:nx+1,0:nz+1), w(0:nx+1,0:nz+1)
-    real, intent(in) :: rho(0:nx+1,0:nz+1)
+  real :: dkdt, dedt, Pk, d_delta_dz
+  real :: du_dx, du_dz, dw_dx, dw_dz, S2
+  real :: adv_k, adv_e, diff_k, diff_e, buoy_k, buoy_e
+  integer :: i, kidx
 
-    real :: dkdt, dedt, D, Pk, d_delta_dz
-    real :: du_dx, du_dz, dw_dx, dw_dz, S2, delta
-    real :: adv_k, adv_e, diff_k, diff_e, buoy_k, buoy_e
-    integer :: i, kidx
+  do i = 1, nx
+    do kidx = 1, nz
 
-    do i = 1, nx
-      do kidx = 1, nz
+      ! 安定化：k, ε の最小値
+      tke(i,kidx)    = max(tke(i,kidx), 1.0e-10)
+      td_eps(i,kidx) = max(td_eps(i,kidx), 1.0e-10)
 
-        ! 渦動粘性係数
-        if (e(i,kidx) > 1.0e-8) then
-          D = cmu * k(i,kidx)**2 / e(i,kidx)
-        else
-          D = 0.0
-        end if
+      ! 渦動粘性係数 nut
+      nut(i,kidx) = cmu * tke(i,kidx)**2 / td_eps(i,kidx)
+      nut(i,kidx) = min(nut(i,kidx), 1.0)  ! 最大値制限（任意）
 
-        ! 速度勾配によるせん断生成項 S^2
-        du_dx = (u(i+1,kidx) - u(i-1,kidx)) / (2.0 * dx)
-        du_dz = (u(i,kidx+1) - u(i,kidx-1)) / (2.0 * dz)
-        dw_dx = (w(i+1,kidx) - w(i-1,kidx)) / (2.0 * dx)
-        dw_dz = (w(i,kidx+1) - w(i,kidx-1)) / (2.0 * dz)
+      ! せん断生成項
+      du_dx = (u(i,kidx) - u(i-1,kidx)) / dx
+      du_dz = (u(i,kidx) - u(i,kidx-1)) / dz
+      dw_dx = (w(i,kidx) - w(i-1,kidx)) / dx
+      dw_dz = (w(i,kidx) - w(i,kidx-1)) / dz
 
-        S2 = 2.0 * (du_dx**2 + dw_dz**2 + 0.5*(du_dz + dw_dx)**2)
-        Pk = D * S2
+      S2 = 2.0 * (du_dx**2 + dw_dz**2 + 0.5*(du_dz + dw_dx)**2)
+      Pk = nut(i,kidx) * S2
 
-        ! 浮力項（密度勾配による浮力生成）
-        d_delta_dz = ((rho0 - rho(i,kidx+1))/rho0 - (rho0 - rho(i,kidx-1))/rho0) / (2.0*dz)
-        buoy_k = sigma_b * g * d_delta_dz
-        if (k(i,kidx) > 1.0e-8) then
-          buoy_e = ce3 * sigma_b * g * d_delta_dz * e(i,kidx) / k(i,kidx)
-        else
-          buoy_e = 0.0
-        end if
+      ! 浮力項（密度勾配）
+      d_delta_dz = ((rho0 - rho(i,kidx)) - (rho0 - rho(i,kidx-1))) / (rho0 * dz)
+      buoy_k = sigma_b * g * d_delta_dz
+      if (tke(i,kidx) > 1.0e-8) then
+        buoy_e = ce3 * sigma_b * g * d_delta_dz * td_eps(i,kidx) / tke(i,kidx)
+      else
+        buoy_e = 0.0
+      end if
 
-        ! ---- k方程式 ----
-        adv_k = - u(i,kidx) * (k(i,kidx) - k(i-1,kidx)) / dx  &
-                - w(i,kidx) * (k(i,kidx) - k(i,kidx-1)) / dz
+      ! ==== k方程式 ====
+      ! 移流項（1次風上差分）
+      adv_k = - u(i,kidx) * (tke(i,kidx) - tke(i-1,kidx)) / dx &
+              - w(i,kidx) * (tke(i,kidx) - tke(i,kidx-1)) / dz
 
-        diff_k = D / sigma_k * ( &
-                  (k(i+1,kidx) - 2.0*k(i,kidx) + k(i-1,kidx)) / dx**2 + &
-                  (k(i,kidx+1) - 2.0*k(i,kidx) + k(i,kidx-1)) / dz**2 )
+      ! 拡散項（1次風上差分）
+      diff_k = - (nut(i,kidx) / sigma_k) * (tke(i,kidx) - tke(i-1,kidx)) / dx &
+               - (nut(i,kidx) / sigma_k) * (tke(i,kidx) - tke(i,kidx-1)) / dz
 
-        dkdt = adv_k + diff_k + Pk + buoy_k - e(i,kidx)
+      dkdt = adv_k + diff_k + Pk + buoy_k - td_eps(i,kidx)
 
-        ! ---- ε方程式 ----
-        adv_e = - u(i,kidx) * (e(i,kidx) - e(i-1,kidx)) / dx  &
-                - w(i,kidx) * (e(i,kidx) - e(i,kidx-1)) / dz
+      ! ==== ε方程式 ====
+      adv_e = - u(i,kidx) * (td_eps(i,kidx) - td_eps(i-1,kidx)) / dx &
+              - w(i,kidx) * (td_eps(i,kidx) - td_eps(i,kidx-1)) / dz
 
-        diff_e = D / sigma_e * ( &
-                   (e(i+1,kidx) - 2.0*e(i,kidx) + e(i-1,kidx)) / dx**2 + &
-                   (e(i,kidx+1) - 2.0*e(i,kidx) + e(i,kidx-1)) / dz**2 )
+      diff_e = - (nut(i,kidx) / sigma_e) * (td_eps(i,kidx) - td_eps(i-1,kidx)) / dx &
+               - (nut(i,kidx) / sigma_e) * (td_eps(i,kidx) - td_eps(i,kidx-1)) / dz
 
-        dedt = adv_e + diff_e + ce1 * Pk * e(i,kidx) / k(i,kidx) &
-                - ce2 * e(i,kidx)**2 / k(i,kidx) + buoy_e
+      dedt = adv_e + diff_e &
+             + ce1 * Pk * td_eps(i,kidx) / tke(i,kidx) &
+             - ce2 * td_eps(i,kidx)**2 / tke(i,kidx) + buoy_e
 
-        ! 時間積分（Euler）
-        k(i,kidx) = max(k(i,kidx) + dt * dkdt, 1.0e-10)
-        e(i,kidx) = max(e(i,kidx) + dt * dedt, 1.0e-10)
+      ! 時間積分（Euler陽解法）
+      tke(i,kidx) = max(tke(i,kidx) + dt * dkdt, 1.0e-10)
+      td_eps(i,kidx) = max(td_eps(i,kidx) + dt * dedt, 1.0e-10)
 
-      end do
     end do
-  end subroutine solve_k_epsilon
-
-end module mod_turbulence
+  end do
+end subroutine solve_k_epsilon_upwind
